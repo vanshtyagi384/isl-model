@@ -1,99 +1,82 @@
-from flask import Flask, request, jsonify
-import numpy as np
-import cv2
-import mediapipe as mp
-import pickle
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 import tensorflow as tf
+import pickle
+import numpy as np
+from pydantic import BaseModel
+from typing import List
+from googletrans import Translator
 
-# ------------------------------
-# Load Model + Label Encoder
-# ------------------------------
+app = FastAPI()
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Load model
 model = tf.keras.models.load_model("linux.h5")
-
 with open("krishnav.pkl", "rb") as f:
     label_encoder = pickle.load(f)
 
-# ------------------------------
-# Mediapipe Initialization
-# ------------------------------
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=True,
-    max_num_hands=2,
-    min_detection_confidence=0.5
-)
 
-# ------------------------------
-# Preprocessing Functions
-# ------------------------------
-def normalize_landmarks(landmarks):
-    landmarks = np.array(landmarks).reshape(-1, 2)
-    base = landmarks[0]
-    centered = landmarks - base
+def normalize_and_reshape_for_cnn(landmarks):
+    landmarks_np = np.array(landmarks).reshape(42, 2)
+    base = landmarks_np[0]
+    centered = landmarks_np - base
     max_value = np.max(np.linalg.norm(centered, axis=1))
-    return (centered / max_value).reshape(42, 2, 1) if max_value != 0 else centered.reshape(42, 2, 1)
 
-def extract_landmarks(img):
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = hands.process(img_rgb)
+    normalized = centered / max_value if max_value > 0 else centered
+    return normalized.reshape(42, 2, 1)
 
-    if not results.multi_hand_landmarks:
-        return None
 
-    # If 1 hand detected → pad second hand with zeros
-    if len(results.multi_hand_landmarks) == 2:
-        l1 = [[lm.x, lm.y] for lm in results.multi_hand_landmarks[0].landmark]
-        l2 = [[lm.x, lm.y] for lm in results.multi_hand_landmarks[1].landmark]
-    else:
-        l1 = [[lm.x, lm.y] for lm in results.multi_hand_landmarks[0].landmark]
-        l2 = [[0, 0]] * 21
+class HandLandmarks(BaseModel):
+    landmarks: List[List[List[float]]]
 
-    combined = l1 + l2  # 42 points
-    return normalize_landmarks(combined)
 
-# ------------------------------
-# Flask App
-# ------------------------------
-app = Flask(__name__)
-
-@app.route("/")
+@app.get("/")
 def home():
-    return {"message": "ISL Model API is running!"}
+    return {"status": "ISHARA API LIVE"}
 
-@app.route("/predict", methods=["POST"])
-def predict():
+
+@app.post("/predict")
+async def predict(data: HandLandmarks):
     try:
-        file = request.files['image']
-        if file is None:
-            return jsonify({"error": "No image uploaded"}), 400
+        # Extract the 42 landmark points
+        landmarks_array = np.array(data.landmarks)[0]
 
-        # Read image
-        img_bytes = file.read()
-        img_np = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(img_np, cv2.IMREAD_COLOR)
+        processed = normalize_and_reshape_for_cnn(landmarks_array)
+        processed = np.expand_dims(processed, axis=0)
 
-        # Extract landmarks
-        landmarks = extract_landmarks(img)
-        if landmarks is None:
-            return jsonify({"error": "Hand not detected"}), 400
+        prediction = model.predict(processed)
+        confidence = np.max(prediction)
 
-        # Model expects shape (1,42,2,1)
-        input_data = np.expand_dims(landmarks, axis=0)
-
-        # Predict
-        preds = model.predict(input_data)
-        class_index = np.argmax(preds)
-        class_label = label_encoder.inverse_transform([class_index])[0]
-
-        return jsonify({
-            "prediction": class_label,
-            "confidence": float(np.max(preds))
-        })
+        if confidence > 0.9:
+            label_index = np.argmax(prediction)
+            label = label_encoder.inverse_transform([label_index])[0]
+            return {"prediction": label, "confidence": float(confidence)}
+        else:
+            return {"prediction": "", "confidence": float(confidence)}
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return {"error": str(e)}
 
 
-if __name__ == "_main_":
-    app.run(debug=True)
+class TranslationRequest(BaseModel):
+    text: str
+    src_lang: str
+    dest_lang: str
 
+
+@app.post("/translate")
+async def translate(request: TranslationRequest):
+    try:
+        translator = Translator()
+        translated = translator.translate(request.text, src=request.src_lang, dest=request.dest_lang)
+        return {"translated_text": translated.text}
+    except Exception as e:
+        return {"error": str(e)}
