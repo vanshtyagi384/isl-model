@@ -1,6 +1,7 @@
-flask
-numpy
+fastapi
+uvicorn
 tensorflow
-mediapipe
-opencv-python-headless
-gunicorn
+numpy
+googletrans==4.0.0-rc1
+pydantic
+python-multipart
