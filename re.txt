@@ -1,6 +1,7 @@
 fastapi
 uvicorn
-tensorflow
+tensorflow-cpu==2.11.0
+
 numpy
 googletrans==4.0.0-rc1
 pydantic
